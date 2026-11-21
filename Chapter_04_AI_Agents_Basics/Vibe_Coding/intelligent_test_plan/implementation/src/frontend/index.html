@@ -1,0 +1,225 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>Intelligent Test Plan Generator</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.3.1/umd/react.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.3.1/umd/react-dom.production.min.js"></script>
+<script src="https://unpkg.com/htm@3.1.1/dist/htm.umd.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/marked/12.0.2/marked.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/mammoth/1.6.0/mammoth.browser.min.js"></script>
+<script src="https://unpkg.com/docx@8.5.0/build/index.umd.js"></script>
+<style>
+  * { box-sizing: border-box; } [hidden] { display: none !important; }
+  body { font-family: system-ui, sans-serif; margin: 0; background: #f5f5f4; color: #44403c; }
+  nav { display: flex; justify-content: space-between; align-items: center; padding: 12px 20px; background: #e7e5e4; color: #44403c; border-bottom: 1px solid #d6d3d1; }
+  nav b { font-size: 16px; } nav div { display: flex; gap: 4px; }
+  nav button { background: none; color: #78716c; border: 0; font-size: 14px; padding: 6px 12px; border-radius: 6px; cursor: pointer; }
+  nav button.on { color: #44403c; background: #fff; }
+  /* Same font and sizes as the downloaded Word document */
+  .md { font-family: Calibri, Carlito, 'Segoe UI', sans-serif; font-size: 11pt; line-height: 1.45; color: #292524; }
+  .md h1 { font-size: 16pt; } .md h2 { font-size: 13pt; margin-top: 1.4em; } .md h3 { font-size: 12pt; }
+  .md table { width: 100%; } .md th { background: #e7e5e4; text-align: left; }
+  .md blockquote { margin: 0; padding: 4px 12px; border-left: 3px solid #a8a29e; color: #57534e; font-style: italic; }
+  main { max-width: 960px; margin: 0 auto; padding: 16px; height: calc(100vh - 50px); display: flex; flex-direction: column; gap: 12px; }
+  .box { background: #fff; border: 1px solid #d6d3d1; border-radius: 12px; padding: 16px; }
+  .plan { flex: 1; overflow: auto; min-height: 0; }
+  .plan table { border-collapse: collapse; } .plan td, .plan th { border: 1px solid #d6d3d1; padding: 4px 8px; }
+  .bar { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; justify-content: space-between; padding-bottom: 10px; border-bottom: 1px solid #e7e5e4; position: sticky; top: -16px; background: #fff; margin: -16px -16px 12px; padding: 12px 16px; }
+  .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+  input, select, textarea { padding: 9px; border: 1px solid #a8a29e; border-radius: 8px; font-size: 14px; font-family: inherit; }
+  input, select { flex: 1; min-width: 180px; }
+  textarea { width: 100%; height: 100%; min-height: 400px; font-family: ui-monospace, monospace; font-size: 13px; resize: none; }
+  .settings input, .settings select { width: 100%; }
+  button.b { padding: 8px 14px; border: 1px solid #78716c; border-radius: 8px; background: #78716c; color: #fff; cursor: pointer; font-size: 14px; }
+  button.b:disabled { opacity: .45; cursor: default; } button.o { background: #fff; color: #57534e; }
+  label { display: block; font-size: 13px; margin: 8px 0 4px; color: #57534e; }
+  .chip { background: #e7e5e4; border-radius: 999px; padding: 4px 10px; font-size: 13px; }
+  .chip button { border: 0; background: none; cursor: pointer; }
+  .tag { font-size: 12px; padding: 2px 8px; border-radius: 999px; background: #e7e5e4; } .tag.ok { background: #d6d3d1; font-weight: 600; }
+  .err { color: #991b1b; } .ok { color: #3f6212; } .muted { color: #78716c; }
+  a { color: #44403c; }
+  .settings textarea { min-height: 130px; height: auto; resize: vertical; }
+  .note { background: #f5f5f4; border-radius: 8px; padding: 8px 12px; font-size: 13px; color: #57534e; }
+</style></head>
+<body><div id="root"></div>
+<script>
+const { useState, useEffect, useRef } = React;
+const html = htm.bind(React.createElement);
+
+// Each user's credentials are saved only in their own browser and sent with each request.
+// The server uses them for that request only and never stores them.
+const local = (k) => ({ get: () => { try { return JSON.parse(localStorage.getItem(k)) } catch { return null } },
+                        set: (v) => { try { v ? localStorage.setItem(k, JSON.stringify(v)) : localStorage.removeItem(k) } catch {} } });
+const store = local('tp'), creds = local('tp-config');
+const ENV = { JIRA_BASE_URL: 'jiraUrl', JIRA_EMAIL: 'jiraEmail', JIRA_TOKEN: 'jiraToken', LLM_PROVIDER: 'provider',
+              GROQ_API_KEY: 'groqKey', GROQ_MODEL: 'groqModel', OLLAMA_URL: 'ollamaUrl', OLLAMA_MODEL: 'ollamaModel' };
+const parseEnv = (text) => Object.fromEntries(text.split(/\r?\n/).map(l => l.match(/^\s*(?:export\s+)?([A-Z_]+)\s*=\s*(.*?)\s*$/))
+  .filter(m => m && ENV[m[1]]).map(m => [ENV[m[1]], m[2].replace(/^(['"])(.*)\1$/, '$2')]));
+
+const api = async (url, body) => {
+  const r = await fetch(url, body === undefined ? {} : { method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ ...body, config: creds.get() || {} }) }).catch(() => { throw new Error('Server unreachable'); });
+  const d = await r.json().catch(() => ({ error: 'Unexpected server response' }));
+  if (!r.ok) throw new Error(d.error); return d;
+};
+const saveBlob = (name, blob) => { const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = name; a.click(); };
+const STATUS = /^> Status:.*$/m;
+
+// ---- Markdown -> real Word (.docx): Calibri 11pt body, styled headings, bordered tables ----
+const FONT = 'Calibri', D = docx;
+const unesc = (s) => { const e = document.createElement('textarea'); e.innerHTML = s; return e.value; };
+const runs = (tokens, f = {}) => (tokens || []).flatMap(t =>
+  t.type === 'strong' ? runs(t.tokens, { ...f, bold: true })
+  : t.type === 'em' ? runs(t.tokens, { ...f, italics: true })
+  : t.type === 'codespan' ? [new D.TextRun({ ...f, text: unesc(t.text), font: 'Consolas' })]
+  : t.type === 'br' || (t.type === 'html' && /<br\s*\/?>/i.test(t.raw)) ? [new D.TextRun({ break: 1 })]
+  : t.type === 'html' ? []
+  : t.tokens ? runs(t.tokens, f)
+  : [new D.TextRun({ ...f, text: unesc(t.text ?? '') })]);
+const line = { style: D.BorderStyle.SINGLE, size: 4, color: 'A8A29E' };
+let listId = 0;
+const blocks = (tokens, level = 0) => tokens.flatMap(t => {
+  switch (t.type) {
+    case 'heading': return [new D.Paragraph({ heading: D.HeadingLevel['HEADING_' + Math.min(t.depth, 3)], children: runs(t.tokens) })];
+    case 'paragraph': return [new D.Paragraph({ children: runs(t.tokens) })];
+    case 'blockquote': return t.tokens.filter(x => x.tokens).map(x => new D.Paragraph({ children: runs(x.tokens, { italics: true, color: '57534E' }),
+      indent: { left: 240 }, border: { left: { ...line, size: 18, space: 8 } } }));
+    case 'list': { const inst = ++listId; return t.items.flatMap(it => it.tokens.flatMap(x => x.type === 'list' ? blocks([x], level + 1)
+      : x.type === 'space' ? [] : [new D.Paragraph({ children: runs(x.tokens || [x]),
+        ...(t.ordered ? { numbering: { reference: 'num', level, instance: inst } } : { bullet: { level } }) })])); }
+    case 'table': return [new D.Table({ width: { size: 100, type: D.WidthType.PERCENTAGE },
+      borders: { top: line, bottom: line, left: line, right: line, insideHorizontal: line, insideVertical: line },
+      rows: [t.header, ...t.rows].map((cells, i) => new D.TableRow({ tableHeader: i === 0, children: cells.map(c => new D.TableCell({
+        shading: i === 0 ? { fill: 'E7E5E4', type: D.ShadingType.CLEAR, color: 'auto' } : undefined,
+        margins: { top: 60, bottom: 60, left: 100, right: 100 },
+        children: [new D.Paragraph({ spacing: { after: 0 }, children: runs(c.tokens, i === 0 ? { bold: true } : {}) })] })) })) }),
+      new D.Paragraph({})];
+    case 'hr': return [new D.Paragraph({ border: { bottom: line } })];
+    case 'code': return t.text.split('\n').map(l => new D.Paragraph({ spacing: { after: 0 }, children: [new D.TextRun({ text: l, font: 'Consolas', size: 20 })] }));
+    default: return [];
+  }
+});
+const heading = (id, size, before) => ({ id, name: id.replace(/(\d)/, ' $1'), basedOn: 'Normal', next: 'Normal', quickFormat: true,
+  run: { font: FONT, size, bold: true, color: '292524' }, paragraph: { spacing: { before, after: 120 }, keepNext: true } });
+const toDocx = (md) => D.Packer.toBlob(new D.Document({
+  styles: { default: { document: { run: { font: FONT, size: 22, color: '292524' }, paragraph: { spacing: { after: 120, line: 276 } } } },
+    paragraphStyles: [heading('Heading1', 32, 0), heading('Heading2', 26, 280), heading('Heading3', 24, 200)] },
+  numbering: { config: [{ reference: 'num', levels: [0, 1, 2].map(l => ({ level: l, format: D.LevelFormat.DECIMAL, text: `%${l + 1}.`,
+    alignment: D.AlignmentType.LEFT, style: { paragraph: { indent: { left: 720 * (l + 1), hanging: 360 } } } })) }] },
+  sections: [{ properties: { page: { margin: { top: 1440, bottom: 1440, left: 1440, right: 1440 } } }, children: blocks(marked.lexer(md)) }],
+}));
+
+function Main({ res, setRes }) {
+  const [key, setKey] = useState(''), [doc, setDoc] = useState(null), [busy, setBusy] = useState(false), [err, setErr] = useState('');
+  const [editing, setEditing] = useState(false), [draft, setDraft] = useState('');
+  const file = useRef();
+  const pick = async (e) => {
+    const f = e.target.files[0]; e.target.value = ''; if (!f) return; setErr('');
+    try {
+      const text = /\.docx$/i.test(f.name) ? (await mammoth.extractRawText({ arrayBuffer: await f.arrayBuffer() })).value
+        : /\.(txt|md)$/i.test(f.name) ? await f.text() : null;
+      if (text === null) throw new Error('Unsupported file. Use .docx, .txt or .md (save old .doc files as .docx)');
+      if (!text.trim()) throw new Error('The document has no readable text');
+      setDoc({ name: f.name, text });
+    } catch (x) { setErr(x.message); }
+  };
+  const go = async (e) => {
+    e.preventDefault(); if (busy || (!key.trim() && !doc)) return;
+    setBusy(`Generating test plan from ${[key.trim().toUpperCase(), doc?.name].filter(Boolean).join(' + ')}…`); setErr(''); setEditing(false);
+    try { setRes(await api('/api/plan', { key, docText: doc?.text, docName: doc?.name })); }
+    catch (x) { setErr(x.message); } finally { setBusy(false); }
+  };
+  const name = res ? (res.key || (res.docName || 'PRD').replace(/\.\w+$/, '')) + '_TestPlan' : '';
+  const approve = () => {
+    const line = `> Status: **APPROVED** on ${new Date().toLocaleString()}.`;
+    setRes({ ...res, approved: true, plan: STATUS.test(res.plan) ? res.plan.replace(STATUS, line) : line + '\n\n' + res.plan });
+  };
+  const word = () => toDocx(res.plan).then(b => saveBlob(name + '.docx', b)).catch(x => setErr('Download failed: ' + x.message));
+
+  return html`
+    <div class="box plan">
+      ${res && !busy && html`<div class="bar">
+        <span class="row muted">${res.source ? html`<a href=${res.source} target="_blank">${res.key}</a>` : null}
+          ${res.docName && html`<span>📄 ${res.docName}</span>`} · ${res.provider}
+          <span class=${'tag' + (res.approved ? ' ok' : '')}>${res.approved ? 'Approved' : 'Draft'}</span></span>
+        <span class="row">
+          ${editing ? html`<button class="b" onClick=${() => { setRes({ ...res, plan: draft }); setEditing(false); }}>Save</button>
+                           <button class="b o" onClick=${() => setEditing(false)}>Cancel</button>`
+          : html`${!res.approved && html`<button class="b o" onClick=${() => { setDraft(res.plan); setEditing(true); }}>Edit</button>
+                                         <button class="b" onClick=${approve}>Approve</button>`}
+                 <button class="b o" onClick=${word}>Download (.docx)</button>
+                 <button class="b o" onClick=${() => { setRes(null); setErr(''); }}>Clear</button>`}
+        </span></div>`}
+      ${busy ? html`<p class="muted">${busy}</p>` : err ? html`<p class="err">⚠ ${err}</p>` : null}
+      ${!busy && (res ? (editing ? html`<textarea value=${draft} onInput=${e => setDraft(e.target.value)} />`
+                                 : html`<div class="md" dangerouslySetInnerHTML=${{ __html: marked.parse(res.plan) }} />`)
+          : !err && html`<p class="muted">Enter a Jira ticket and/or attach a PRD document (.docx) to generate a test plan.
+              First time here? Add your credentials in <b>Settings</b>.</p>`)}
+    </div>
+    <form class="box row" onSubmit=${go}>
+      <input placeholder="Jira ticket, e.g. QA-123 (optional if PRD attached)" value=${key} onInput=${e => setKey(e.target.value)} />
+      ${doc ? html`<span class="chip">📄 ${doc.name} <button type="button" title="Remove" onClick=${() => setDoc(null)}>✕</button></span>`
+            : html`<button type="button" class="b o" onClick=${() => file.current.click()}>Attach PRD</button>`}
+      <input type="file" accept=".docx,.txt,.md" ref=${file} onChange=${pick} hidden />
+      <button class="b" disabled=${busy || (!key.trim() && !doc)}>${busy ? 'Generating…' : 'Generate'}</button>
+    </form>`;
+}
+
+const BLANK = { jiraUrl: '', jiraEmail: '', jiraToken: '', provider: 'groq', groqKey: '', groqModel: 'openai/gpt-oss-120b', ollamaUrl: 'http://localhost:11434', ollamaModel: 'llama3.1' };
+
+function Settings() {
+  const [s, setS] = useState(() => ({ ...BLANK, ...(creds.get() || {}) })), [msg, setMsg] = useState({});
+  const [envText, setEnvText] = useState(''), [hasDefault, setHasDefault] = useState({});
+  useEffect(() => { api('/api/settings').then(d => setHasDefault(d.hasDefault)).catch(() => {}); }, []);
+  const set = (k, v) => setS({ ...s, [k]: v });
+  const f = (k, label, type = 'text') => html`<label>${label}</label>
+    <input type=${type} value=${s[k]} autocomplete="off" placeholder=${hasDefault[k] ? 'Using the server .env value' : ''} onInput=${e => set(k, e.target.value)} />`;
+  const status = (n, v) => setMsg(m => ({ ...m, [n]: v }));
+  const save = () => { creds.set(s); status('save', [true, 'Saved in this browser']); };
+  const loadEnv = () => {
+    const vals = parseEnv(envText), n = Object.keys(vals).length;
+    if (!n) return status('env', [false, 'No known settings found. Expected lines like GROQ_API_KEY=...']);
+    const next = { ...s, ...vals }; setS(next); creds.set(next); setEnvText('');
+    status('env', [true, `Loaded and saved ${n} setting${n > 1 ? 's' : ''}`]);
+  };
+  const run = async (name, url) => {
+    creds.set(s); status(name, [null, 'Testing…']);
+    try { status(name, [true, (await api(url, {})).message]); } catch (e) { status(name, [false, e.message]); }
+  };
+  const forget = () => { creds.set(null); setS({ ...BLANK }); setMsg({ save: [true, 'Credentials removed from this browser'] }); };
+  const M = ({ n }) => msg[n] ? html`<span class=${msg[n][0] ? 'ok' : msg[n][0] === false ? 'err' : 'muted'}>${msg[n][1]}</span>` : null;
+  return html`<div class="settings" style=${{ overflow: 'auto' }}>
+    <div class="box" style=${{ marginBottom: '12px' }}><h3>Your credentials</h3>
+      <p class="note">Your credentials are saved only in this browser. They are sent to the server with each request
+        and are never stored on it. Use <b>Remove my credentials</b> on a shared computer.</p>
+      <label>Paste your .env file (optional)</label>
+      <textarea placeholder=${'JIRA_BASE_URL=https://your-company.atlassian.net\nJIRA_EMAIL=you@example.com\nJIRA_TOKEN=...\nGROQ_API_KEY=...'}
+        value=${envText} onInput=${e => setEnvText(e.target.value)} />
+      <p class="row"><button class="b" disabled=${!envText.trim()} onClick=${loadEnv}>Load from .env</button><${M} n="env" /></p>
+    </div>
+    <div class="box" style=${{ marginBottom: '12px' }}><h3>JIRA Connection</h3>
+      ${f('jiraToken', 'Token', 'password')}${f('jiraEmail', 'Email')}${f('jiraUrl', 'URL')}
+      <p class="row"><button class="b" onClick=${() => run('jira', '/api/test/jira')}>Save & Test Connection</button><${M} n="jira" /></p>
+    </div>
+    <div class="box" style=${{ marginBottom: '12px' }}><h3>LLM Configuration</h3>
+      <label>Provider used for generation</label>
+      <select value=${s.provider} onChange=${e => set('provider', e.target.value)}><option value="groq">Groq.com</option><option value="ollama">Ollama (local)</option></select>
+      <h4>1. Ollama Connection</h4>
+      <p class="note">Ollama only works when this app runs on your own computer, not on the hosted (Vercel) version.</p>
+      ${f('ollamaUrl', 'Ollama URL')}${f('ollamaModel', 'Model')}
+      <p class="row"><button class="b o" onClick=${() => run('ollama', '/api/test/ollama')}>Save & Test Local LLM</button><${M} n="ollama" /></p>
+      <h4>2. <a href="https://console.groq.com/keys" target="_blank">Groq.com ↗</a> (API key)</h4>${f('groqKey', 'API key', 'password')}${f('groqModel', 'Model')}
+      <p class="row"><button class="b o" onClick=${() => run('groq', '/api/test/groq')}>Save & Test Groq.com</button><${M} n="groq" /></p>
+    </div>
+    <p class="row"><button class="b" onClick=${save}>Save</button><button class="b o" onClick=${forget}>Remove my credentials</button><${M} n="save" /></p>
+  </div>`;
+}
+
+function App() {
+  const [page, setPage] = useState('main'), [res, setResState] = useState(store.get);
+  const setRes = (p) => { setResState(p); store.set(p); };
+  const tab = (id, label) => html`<button class=${page === id ? 'on' : ''} onClick=${() => setPage(id)}>${label}</button>`;
+  return html`<nav><b>Intelligent Test Plan Generator</b><div>${tab('main', 'Main page')}${tab('settings', 'Settings')}</div></nav>
+    <main hidden=${page !== 'main'}><${Main} res=${res} setRes=${setRes} /></main>
+    ${page === 'settings' && html`<main><${Settings} /></main>`}`;
+}
+ReactDOM.createRoot(document.getElementById('root')).render(html`<${App} />`);
+</script></body></html>

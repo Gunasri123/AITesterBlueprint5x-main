@@ -1,0 +1,12 @@
+{
+  "name": "qa-practice-docgen",
+  "private": true,
+  "description": "Vercel deployment: React frontend (frontend/) + Express API as a serverless function (api/index.js -> backend/app.js)",
+  "engines": { "node": "22.x" },
+  "dependencies": {
+    "docx": "^9.0.0",
+    "express": "^4.21.0",
+    "mammoth": "^1.8.0",
+    "multer": "^2.0.0"
+  }
+}

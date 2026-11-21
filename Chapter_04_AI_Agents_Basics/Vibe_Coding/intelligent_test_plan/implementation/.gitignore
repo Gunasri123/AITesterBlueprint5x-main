@@ -1,0 +1,7 @@
+# Saved test plans (may contain Jira / PRD content)
+data/
+# Vercel CLI link info
+.vercel
+
+.vercel
+.env*

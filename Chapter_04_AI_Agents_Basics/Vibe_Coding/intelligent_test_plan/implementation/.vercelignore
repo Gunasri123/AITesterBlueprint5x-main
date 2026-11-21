@@ -1,0 +1,4 @@
+# Never upload credentials or saved plans to Vercel
+.env
+.env.*
+data/

@@ -1,0 +1,9 @@
+{
+  "functions": {
+    "api/index.js": { "maxDuration": 60, "includeFiles": "src/backend/**" }
+  },
+  "rewrites": [
+    { "source": "/api/(.*)", "destination": "/api" },
+    { "source": "/", "destination": "/src/frontend/index.html" }
+  ]
+}
